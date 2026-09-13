@@ -1,0 +1,23 @@
+{
+  "port": 3000,
+  "bind": "127.0.0.1",
+  "defaultProvider": "xapi",
+  "keyMode": "config",
+  "providers": [
+    {
+      "id": "xapi",
+      "name": "xapi-token",
+      "upstream": "https://xapi-token.xyz",
+      "proxy": "http://127.0.0.1:7890",
+      "userAgent": "claude-code/1.0.0",
+      "apiKeys": ["your-api-key-here"],
+      "keyStrategy": "round-robin",
+      "models": ["claude-sonnet-5", "claude-opus-5"]
+    }
+  ],
+  "log": {
+    "enabled": true,
+    "dir": "./logs",
+    "maxDays": 7
+  }
+}

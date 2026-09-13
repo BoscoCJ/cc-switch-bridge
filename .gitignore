@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Config with real credentials
+config.json
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
