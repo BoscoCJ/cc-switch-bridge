@@ -1,84 +1,84 @@
-' CC Switch Bridge - Windows 静默启动脚本
-' 自动检测 Node.js 路径，无控制台窗口运行
-
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set shell = CreateObject("WScript.Shell")
 
-' 获取脚本所在目录
 scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
+serverPath = scriptDir & "\server.js"
+configPath = scriptDir & "\config.json"
+logPath = scriptDir & "\bridge-startup.log"
 
-' 自动检测 Node.js
-nodePath = FindNode()
-If nodePath = "" Then
-    MsgBox "CC Switch Bridge: 未找到 Node.js，请先安装 Node.js 18+", vbCritical, "启动失败"
+' Check required files
+If Not fso.FileExists(serverPath) Then
+    MsgBox "CC Switch Bridge: server.js not found in " & scriptDir, vbCritical, "Error"
     WScript.Quit 1
 End If
 
-serverPath = fso.BuildPath(scriptDir, "server.js")
-configPath = fso.BuildPath(scriptDir, "config.json")
+If Not fso.FileExists(configPath) Then
+    MsgBox "CC Switch Bridge: config.json not found." & vbCrLf & _
+           "Please copy config.example.json to config.json and edit it.", vbCritical, "Error"
+    WScript.Quit 1
+End If
 
-' 静默运行（第二个参数 0 = 隐藏窗口）
-cmd = """" & nodePath & """ """ & serverPath & """ --config """ & configPath & """"
-shell.Run cmd, 0, False
+' Find Node.js
+nodePath = ""
 
-Function FindNode()
-    ' 优先级：
-    ' 1. 系统 PATH 中的 node
-    ' 2. WorkBuddy 自带 Node
-    ' 3. nvm for Windows
-    ' 4. 常见安装路径
-    
-    ' 1. 系统 PATH
-    On Error Resume Next
-    Set exec = shell.Exec("node --version")
-    If Err.Number = 0 Then
-        exec.StdOut.ReadAll
-        If exec.ExitCode = 0 Then
-            FindNode = "node"
-            Exit Function
-        End If
+' 1. System PATH
+On Error Resume Next
+Set exec = shell.Exec("node --version")
+If Err.Number = 0 Then
+    ver = exec.StdOut.ReadAll
+    If exec.ExitCode = 0 Then
+        nodePath = "node"
     End If
-    On Error GoTo 0
-    
-    ' 2. WorkBuddy 自带 Node（搜索 versions 目录）
-    wbNodeBase = fso.BuildPath(shell.ExpandEnvironmentStrings("%USERPROFILE%"), ".workbuddy\binaries\node\versions")
-    If fso.FolderExists(wbNodeBase) Then
-        For Each verFolder In fso.GetFolder(wbNodeBase).SubFolders
-            nodeExe = fso.BuildPath(verFolder, "node.exe")
+End If
+On Error GoTo 0
+
+' 2. WorkBuddy bundled Node
+If nodePath = "" Then
+    wbBase = shell.ExpandEnvironmentStrings("%USERPROFILE%") & "\.workbuddy\binaries\node\versions"
+    If fso.FolderExists(wbBase) Then
+        For Each f In fso.GetFolder(wbBase).SubFolders
+            nodeExe = f.Path & "\node.exe"
             If fso.FileExists(nodeExe) Then
-                FindNode = nodeExe
-                Exit Function
+                nodePath = nodeExe
+                Exit For
             End If
         Next
     End If
-    
-    ' 3. nvm for Windows
-    nvmSymlink = shell.ExpandEnvironmentStrings("%PROGRAMFILES%") & "\nodejs\node.exe"
-    If fso.FileExists(nvmSymlink) Then
-        FindNode = nvmSymlink
-        Exit Function
+End If
+
+' 3. Common paths
+If nodePath = "" Then
+    If fso.FileExists("C:\Program Files\nodejs\node.exe") Then
+        nodePath = "C:\Program Files\nodejs\node.exe"
+    ElseIf fso.FileExists("C:\Program Files (x86)\nodejs\node.exe") Then
+        nodePath = "C:\Program Files (x86)\nodejs\node.exe"
     End If
-    
-    ' 4. 常见路径
-    Dim commonPaths
-    commonPaths = Array( _
-        shell.ExpandEnvironmentStrings("%LOCALAPPDATA%") & "\fnm_multishells\*\node.exe", _
-        "C:\Program Files\nodejs\node.exe", _
-        "C:\nodejs\node.exe" _
-    )
-    
-    For Each pattern In commonPaths
-        ' 简单通配符匹配
-        Set folder = fso.GetParentFolderName(pattern)
-        If fso.FolderExists(folder) Then
-            For Each f In fso.GetFolder(folder).Files
-                If LCase(f.Name) = "node.exe" Then
-                    FindNode = f.Path
-                    Exit Function
-                End If
-            Next
-        End If
-    Next
-    
-    FindNode = ""
-End Function
+End If
+
+If nodePath = "" Then
+    MsgBox "CC Switch Bridge: Node.js not found." & vbCrLf & _
+           "Please install Node.js 18+ from https://nodejs.org", vbCritical, "Error"
+    WScript.Quit 1
+End If
+
+' Build command
+If nodePath = "node" Then
+    cmd = "node.exe """ & serverPath & """ --config """ & configPath & """"
+Else
+    cmd = """" & nodePath & """ """ & serverPath & """ --config """ & configPath & """"
+End If
+
+' Start silently
+On Error Resume Next
+shell.Run cmd, 0, False
+If Err.Number <> 0 Then
+    MsgBox "CC Switch Bridge: Failed to start." & vbCrLf & _
+           "Error: " & Err.Description, vbCritical, "Error"
+    WScript.Quit 1
+End If
+On Error GoTo 0
+
+' Write PID file for stop script
+Set pidFile = fso.CreateTextFile(scriptDir & "\bridge.pid", True)
+pidFile.WriteLine Now
+pidFile.Close
