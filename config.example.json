@@ -1,14 +1,14 @@
 {
   "port": 3000,
   "bind": "127.0.0.1",
-  "defaultProvider": "xapi",
-  "keyMode": "config",
+  "defaultProvider": "example",
+  "keyMode": "passthrough",
   "defaultMaxTokens": 262144,
   "providers": [
     {
-      "id": "xapi",
-      "name": "xapi-token",
-      "upstream": "https://xapi-token.xyz",
+      "id": "example",
+      "name": "Example Provider",
+      "upstream": "https://your-upstream-api.com",
       "proxy": "http://127.0.0.1:7890",
       "userAgent": "claude-code/1.0.0",
       "apiKeys": ["your-api-key-here"],
