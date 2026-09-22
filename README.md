@@ -36,13 +36,13 @@ Bridge 按模型名前缀自动选择转发协议：
 WorkBuddy / 其它 OpenAI 客户端
         │  POST /v1/chat/completions (OpenAI 格式)
         ▼
-localhost:3000 (Bridge)
+localhost:<port> (Bridge)
         │
         ├─ grok-*     原样转发 → upstream /v1/chat/completions
         └─ 其它       转 Anthropic → upstream /v1/messages
         │
         ▼
-HTTP Proxy (可选，如 Clash)
+HTTP Proxy (可选)
         │
         ▼
 上游 API (在 config.json 中配置)
@@ -63,7 +63,7 @@ HTTP Proxy (可选，如 Clash)
       "id": "example",
       "name": "Example Provider",
       "upstream": "https://your-upstream-api.com",
-      "proxy": "http://127.0.0.1:7890",
+      "proxy": "http://127.0.0.1:<proxy-port>",
       "userAgent": "claude-code/1.0.0",
       "apiKeys": ["your-api-key-here"],
       "keyStrategy": "round-robin",
@@ -80,6 +80,7 @@ HTTP Proxy (可选，如 Clash)
 
 **关键配置项：**
 
+- `port`: Bridge 监听端口，默认 3000，可自定义
 - `keyMode`: `"passthrough"` 表示使用客户端传入的 API Key；`"config"` 表示使用配置文件中的 Key
 - `proxy`: HTTP 代理地址，用于解决网络访问限制。留空或设为 `null` 表示直连
 - `userAgent`: 伪装 User-Agent，某些上游会检查
@@ -90,22 +91,25 @@ HTTP Proxy (可选，如 Clash)
 ### 方式 1：VBS 隐藏运行（推荐）
 
 ```powershell
-# 启动（无窗口）
-wscript.exe "D:\AI\cc-switch-bridge\run-silent.vbs"
+# 进入项目目录
+cd <your-bridge-directory>
 
-# 查看状态
-netstat -ano | findstr :3000
+# 启动（无窗口）
+wscript.exe "run-silent.vbs"
+
+# 查看状态（替换 <port> 为实际端口）
+netstat -ano | findstr :<port>
 
 # 停止（用 netstat 查到的 PID 替换）
 taskkill /F /PID <PID>
 ```
 
-**开机自启**：`run-silent.vbs` 已复制到 Windows 启动文件夹。
+**开机自启**：将 `run-silent.vbs` 的快捷方式放入 Windows 启动文件夹。
 
 ### 方式 2：前台运行（调试用）
 
 ```powershell
-cd D:\AI\cc-switch-bridge
+cd <your-bridge-directory>
 node server.js
 
 # 自定义端口
@@ -115,9 +119,12 @@ node server.js --port 3001
 ### 方式 3：注册为 Windows 服务（需管理员权限）
 
 ```powershell
-cd D:\AI\cc-switch-bridge
-.\nssm.exe install CC-Bridge "C:\Users\bson9\.workbuddy\binaries\node\versions\22.22.2-2\node.exe" "D:\AI\cc-switch-bridge\server.js"
-.\nssm.exe set CC-Bridge AppDirectory "D:\AI\cc-switch-bridge"
+cd <your-bridge-directory>
+
+# 替换 <node-path> 为 Node.js 可执行文件路径
+# 替换 <bridge-directory> 为项目绝对路径
+.\nssm.exe install CC-Bridge "<node-path>" "<bridge-directory>\server.js"
+.\nssm.exe set CC-Bridge AppDirectory "<bridge-directory>"
 .\nssm.exe set CC-Bridge DisplayName "CC Switch Bridge"
 .\nssm.exe set CC-Bridge Start SERVICE_AUTO_START
 .\nssm.exe start CC-Bridge
@@ -131,7 +138,7 @@ cd D:\AI\cc-switch-bridge
 
 | 配置项 | 值 |
 |--------|-----|
-| Endpoint | `http://127.0.0.1:3000/v1` |
+| Endpoint | `http://127.0.0.1:<port>/v1` |
 | API Key | 上游 API 的 Key |
 | Model | 配置文件 `models` 列表中的模型名 |
 
@@ -141,7 +148,7 @@ cd D:\AI\cc-switch-bridge
 
 | 配置项 | 值 |
 |--------|-----|
-| URL | `http://127.0.0.1:3000/v1` |
+| URL | `http://127.0.0.1:<port>/v1` |
 | 上游格式 | Chat Completions (OpenAI) |
 | Auth | ANTHROPIC_AUTH_TOKEN |
 | Model | 配置文件 `models` 列表中的模型名 |
@@ -151,13 +158,13 @@ Bridge 会根据模型名自动选择转发协议。
 ## 前置条件
 
 - **Node.js** 运行时（推荐 18+）
-- **HTTP 代理**（可选）：如果上游需要特殊网络访问，需配置代理
+- **HTTP 代理**（可选）：如果上游需要特殊网络访问，需在 `config.json` 中配置 `proxy`
 
 ## 故障排查
 
 | 问题 | 排查 |
 |------|------|
-| 连接被拒绝 | `netstat -ano \| findstr :3000` 看 Bridge 是否在跑 |
+| 连接被拒绝 | `netstat -ano \| findstr :<port>` 看 Bridge 是否在跑 |
 | 上游 401 | API Key 无效，检查 `config.json` 或客户端传入的 Key |
 | 上游 500/503 | 该模型可能不支持当前转发协议，检查模型名是否匹配 |
 | 连接超时 | 代理是否开启，`config.json` 中的 `proxy` 配置是否正确 |
