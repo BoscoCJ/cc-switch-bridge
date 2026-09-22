@@ -8,6 +8,10 @@ config.json
 logs/
 *.log
 
+# Runtime files
+bridge.pid
+startup-check.txt
+
 # OS files
 .DS_Store
 Thumbs.db
