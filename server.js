@@ -182,10 +182,6 @@ function resolveProvider(model) {
   return CONFIG.providers[0] || null;
 }
 
-function isOpenaiPassthrough(model) {
-  return typeof model === "string" && model.toLowerCase().startsWith("grok");
-}
-
 // ─── OpenAI → Anthropic 请求转换 ────────────────────────
 function openaiToAnthropic(openaiBody, provider) {
   const messages = [];
@@ -503,7 +499,7 @@ const server = http.createServer(async (req, res) => {
       defaultProvider: CONFIG.defaultProvider,
       keyMode: CONFIG.keyMode,
       endpoints: ["/v1/chat/completions", "/v1/models"],
-      passthrough: "grok-* → OpenAI /v1/chat/completions; others → Anthropic /v1/messages",
+      passthrough: "Provider protocol config: openai → /v1/chat/completions; anthropic → /v1/messages",
     }));
     return;
   }
@@ -554,14 +550,14 @@ const server = http.createServer(async (req, res) => {
           return;
         }
 
-        const passthrough = isOpenaiPassthrough(requestedModel);
+        const openaiProvider = provider.protocol === "openai";
         const upstreamUrl = new URL(provider.upstream);
         const msgCount = Array.isArray(openaiBody.messages) ? openaiBody.messages.length : 0;
-        log(`${isStream ? "STREAM" : "NORMAL"} ${passthrough ? "PASSTHROUGH" : "CONVERT"} model=${requestedModel} provider=${provider.id} key=${apiKey.slice(0, 8)}... msgs=${msgCount}`);
+        log(`${isStream ? "STREAM" : "NORMAL"} ${openaiProvider ? "OPENAI" : "ANTHROPIC"} model=${requestedModel} provider=${provider.id} protocol=${provider.protocol || "anthropic"} key=${apiKey.slice(0, 8)}... msgs=${msgCount}`);
 
         let bodyStr;
         let sendOpts;
-        if (passthrough) {
+        if (openaiProvider) {
           bodyStr = JSON.stringify(openaiBody);
           sendOpts = { path: "/v1/chat/completions", anthropic: false };
         } else {
@@ -593,7 +589,7 @@ const server = http.createServer(async (req, res) => {
             return;
           }
 
-          if (passthrough) {
+          if (openaiProvider) {
             upstreamRes.pipe(res);
             req.on("close", () => {
               upstreamRes.destroy?.();
@@ -645,7 +641,7 @@ const server = http.createServer(async (req, res) => {
             return;
           }
 
-          const openaiResp = passthrough ? respBody : anthropicToOpenai(respBody, openaiBody.model);
+          const openaiResp = openaiProvider ? respBody : anthropicToOpenai(respBody, openaiBody.model);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(typeof openaiResp === "string" ? openaiResp : JSON.stringify(openaiResp));
         }

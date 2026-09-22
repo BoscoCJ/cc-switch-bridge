@@ -19,16 +19,16 @@ OpenAI ↔ Anthropic 协议转换代理。解决 WorkBuddy 只支持 OpenAI 格�
 - 支持 HTTP 代理，解决网络访问限制
 - 可配置多个 Provider 和 API Key
 
-## 协议分流
+## 协议路由
 
-Bridge 按模型名前缀自动选择转发协议：
+Bridge 根据 Provider 的 `protocol` 配置决定转发方式：
 
-| 模型前缀 | 转发协议 | 说明 |
-|---------|---------|------|
-| `grok-*` | OpenAI `/v1/chat/completions` | 原样转发，不转换 |
-| 其它 | Anthropic `/v1/messages` | OpenAI → Anthropic 转换 |
+| protocol | 转发目标 | 说明 |
+|----------|---------|------|
+| `anthropic` | `/v1/messages` | OpenAI → Anthropic 转换 |
+| `openai` | `/v1/chat/completions` | 原样转发，不转换 |
 
-这是因为部分模型（如 Grok）的上游只提供 OpenAI Chat Completions 接口，不支持 Anthropic 协议。
+每个 Provider 独立配置协议。同一个上游 API 可以注册多个 Provider，分别处理不同协议。
 
 ## 架构
 
@@ -38,8 +38,8 @@ WorkBuddy / 其它 OpenAI 客户端
         ▼
 localhost:<port> (Bridge)
         │
-        ├─ grok-*     原样转发 → upstream /v1/chat/completions
-        └─ 其它       转 Anthropic → upstream /v1/messages
+        ├─ Provider A (protocol: anthropic)  → /v1/messages
+        └─ Provider B (protocol: openai)     → /v1/chat/completions
         │
         ▼
 HTTP Proxy (可选)
@@ -50,7 +50,7 @@ HTTP Proxy (可选)
 
 ## 配置说明
 
-复制 `config.example.json` 为 `config.json`，按注释填写：
+复制 `config.example.json` 为 `config.json`：
 
 ```json
 {
@@ -60,14 +60,26 @@ HTTP Proxy (可选)
   "defaultMaxTokens": 262144,
   "providers": [
     {
-      "id": "example",
-      "name": "Example Provider",
+      "id": "anthropic",
+      "name": "Anthropic Provider",
       "upstream": "https://your-upstream-api.com",
+      "protocol": "anthropic",
       "proxy": "http://127.0.0.1:<proxy-port>",
       "userAgent": "claude-code/1.0.0",
       "apiKeys": ["your-api-key-here"],
       "keyStrategy": "round-robin",
-      "models": ["claude-sonnet-5", "claude-opus-5", "grok-4.7"]
+      "models": ["claude-sonnet-5", "claude-opus-5"]
+    },
+    {
+      "id": "openai",
+      "name": "OpenAI Provider",
+      "upstream": "https://your-upstream-api.com",
+      "protocol": "openai",
+      "proxy": "http://127.0.0.1:<proxy-port>",
+      "userAgent": "claude-code/1.0.0",
+      "apiKeys": ["your-api-key-here"],
+      "keyStrategy": "round-robin",
+      "models": ["grok-4.6", "grok-4.7"]
     }
   ],
   "log": {
@@ -82,18 +94,28 @@ HTTP Proxy (可选)
 
 - `port`: Bridge 监听端口，默认 3000，可自定义
 - `keyMode`: `"passthrough"` 表示使用客户端传入的 API Key；`"config"` 表示使用配置文件中的 Key
-- `proxy`: HTTP 代理地址，用于解决网络访问限制。留空或设为 `null` 表示直连
-- `userAgent`: 伪装 User-Agent，某些上游会检查
-- `models`: 支持的模型列表，用于路由匹配
+- `providers[].protocol`: 转发协议，`"anthropic"` 或 `"openai"`。不填默认 `"anthropic"`
+- `providers[].proxy`: HTTP 代理地址，用于解决网络访问限制。留空或设为 `null` 表示直连
+- `providers[].userAgent`: 伪装 User-Agent，某些上游会检查
+- `providers[].models`: 该 Provider 支持的模型列表，用于路由匹配
 
 ## 启动方式
 
-### 方式 1：VBS 隐藏运行（推荐）
+### Windows
+
+#### 前台运行（调试用）
 
 ```powershell
-# 进入项目目录
 cd <your-bridge-directory>
+node server.js
 
+# 自定义端口
+node server.js --port 3001
+```
+
+#### VBS 隐藏运行（推荐）
+
+```powershell
 # 启动（无窗口）
 wscript.exe "run-silent.vbs"
 
@@ -106,17 +128,7 @@ taskkill /F /PID <PID>
 
 **开机自启**：将 `run-silent.vbs` 的快捷方式放入 Windows 启动文件夹。
 
-### 方式 2：前台运行（调试用）
-
-```powershell
-cd <your-bridge-directory>
-node server.js
-
-# 自定义端口
-node server.js --port 3001
-```
-
-### 方式 3：注册为 Windows 服务（需管理员权限）
+#### 注册为 Windows 服务（需管理员权限）
 
 ```powershell
 cd <your-bridge-directory>
@@ -128,6 +140,42 @@ cd <your-bridge-directory>
 .\nssm.exe set CC-Bridge DisplayName "CC Switch Bridge"
 .\nssm.exe set CC-Bridge Start SERVICE_AUTO_START
 .\nssm.exe start CC-Bridge
+```
+
+### macOS / Linux
+
+#### 前台运行（调试用）
+
+```bash
+cd <your-bridge-directory>
+./start.sh          # 自动检测 Node.js
+# 或
+node server.js
+```
+
+#### LaunchAgent 开机自启（推荐）
+
+```bash
+cd <your-bridge-directory>
+chmod +x install-launchd.sh
+./install-launchd.sh
+```
+
+脚本会自动检测 Node.js 路径，生成 `~/Library/LaunchAgents/com.cc-switch.bridge.plist` 并加载。
+
+```bash
+# 查看状态
+launchctl list | grep cc-switch
+
+# 停止
+launchctl unload ~/Library/LaunchAgents/com.cc-switch.bridge.plist
+
+# 启动
+launchctl load ~/Library/LaunchAgents/com.cc-switch.bridge.plist
+
+# 卸载
+launchctl unload ~/Library/LaunchAgents/com.cc-switch.bridge.plist && \
+  rm ~/Library/LaunchAgents/com.cc-switch.bridge.plist
 ```
 
 ## 客户端配置
@@ -185,8 +233,10 @@ Bridge 会根据模型名自动选择转发协议。
 | `server.js` | 主服务，Node.js 协议转换代理 |
 | `config.json` | 运行时配置（含 API Key，已 gitignore） |
 | `config.example.json` | 配置示例 |
-| `run-silent.vbs` | 隐藏窗口启动脚本 |
+| `run-silent.vbs` | Windows 隐藏窗口启动脚本 |
 | `start.bat` / `stop.bat` | Windows 启停脚本 |
+| `start.sh` / `stop.sh` | macOS / Linux 启停脚本 |
+| `install-launchd.sh` | macOS LaunchAgent 安装脚本 |
 | `nssm.exe` | Windows 服务管理工具（备用） |
 
 ## 许可证
