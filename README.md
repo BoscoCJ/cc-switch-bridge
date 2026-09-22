@@ -1,23 +1,27 @@
 # CC Switch Bridge
 
-OpenAI → Anthropic 格式转换代理，让 WorkBuddy 通过 clash 代理直连 xapi-token.xyz 的 Claude 模型。
+WorkBuddy / CC Switch 的本地 OpenAI 入站代理。默认把请求转成 Anthropic 发给 xapi；`grok-*` 原样透传到 OpenAI Chat Completions（xapi 的 Grok 分组不提供 `/v1/messages`）。
 
 ## 架构
 
 ```
-WorkBuddy → localhost:3000 (Bridge, OpenAI格式)
-                    ↓
-              clash:7890 (HTTP代理)
-                    ↓
-              xapi-token.xyz (Anthropic格式)
-                    ↓
-              Claude API
+WorkBuddy / CC Switch
+        │  OpenAI POST /v1/chat/completions
+        ▼
+localhost:3000 (Bridge)
+        │
+        ├─ grok-*     原样转发 → xapi /v1/chat/completions
+        └─ 其它       转 Anthropic → xapi /v1/messages
+        ▼
+clash:7890
+        ▼
+xapi-token.xyz
 ```
 
 **为什么需要 Bridge？**
 - WorkBuddy 自定义模型只支持 OpenAI 格式（`/v1/chat/completions`）
-- xapi-token.xyz 的 Claude 接口使用 Anthropic 格式（`/v1/messages`）
-- Bridge 自动做格式转换，并伪装成 Claude Code 的 User-Agent
+- xapi 的 Claude / GPT / Gemini 走 Anthropic（`/v1/messages`）；Grok 只走 OpenAI Chat Completions
+- Bridge 按模型名前缀分流，并伪装成 Claude Code 的 User-Agent
 
 ## 文件说明
 
@@ -83,8 +87,10 @@ cd D:\AI\cc-switch-bridge
 | 配置项 | 值 |
 |--------|-----|
 | Endpoint | `http://127.0.0.1:3000/v1` |
-| API Key | xapi-token.xyz 的 API Key |
-| Model | `claude-sonnet-5` |
+| API Key | xapi-token.xyz 的 API Key（各模型用对应分组的 key） |
+| Model | `claude-sonnet-5` / `gemini-3.8-flash` / `grok-4.7` 等 |
+
+Grok 不要再指向 LiteLLM `:4000`。CC Switch 的 xapi-Grok 上游 URL 用 `http://127.0.0.1:3000`，格式选 Chat Completions。
 
 ## 前置条件
 

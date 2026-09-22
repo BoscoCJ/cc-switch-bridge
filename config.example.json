@@ -3,6 +3,7 @@
   "bind": "127.0.0.1",
   "defaultProvider": "xapi",
   "keyMode": "config",
+  "defaultMaxTokens": 262144,
   "providers": [
     {
       "id": "xapi",
@@ -12,7 +13,7 @@
       "userAgent": "claude-code/1.0.0",
       "apiKeys": ["your-api-key-here"],
       "keyStrategy": "round-robin",
-      "models": ["claude-sonnet-5", "claude-opus-5"]
+      "models": ["claude-sonnet-5", "claude-opus-5", "grok-4.6", "grok-4.7"]
     }
   ],
   "log": {

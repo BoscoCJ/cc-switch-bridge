@@ -1,10 +1,11 @@
 /**
- * CC Switch Bridge — OpenAI → Anthropic 格式转换代理
- * 
- * 支持多 Provider、多 API Key、跨平台运行。
- * 
- * 链路：客户端 → localhost:PORT (Bridge) → [proxy] → upstream → Claude
- * 
+ * CC Switch Bridge — OpenAI 入站代理
+ *
+ * 默认：OpenAI → Anthropic（/v1/messages），给 WorkBuddy 的 Claude/GPT/Gemini 用。
+ * grok-*：OpenAI 原样透传（/v1/chat/completions），xapi 的 Grok 分组不提供 Anthropic。
+ *
+ * 链路：客户端 → localhost:PORT (Bridge) → [proxy] → upstream
+ *
  * 用法：
  *   node server.js
  *   node server.js --config ./config.json
@@ -181,6 +182,10 @@ function resolveProvider(model) {
   return CONFIG.providers[0] || null;
 }
 
+function isOpenaiPassthrough(model) {
+  return typeof model === "string" && model.toLowerCase().startsWith("grok");
+}
+
 // ─── OpenAI → Anthropic 请求转换 ────────────────────────
 function openaiToAnthropic(openaiBody, provider) {
   const messages = [];
@@ -219,9 +224,12 @@ function openaiToAnthropic(openaiBody, provider) {
     }
   }
 
+  const defaultMax = CONFIG.defaultMaxTokens || 8192;
+  const maxTokens = openaiBody.max_tokens || openaiBody.max_completion_tokens || defaultMax;
+
   const anthropicReq = {
     model: openaiBody.model || provider?.models?.[0] || "claude-sonnet-5",
-    max_tokens: openaiBody.max_tokens || openaiBody.max_completion_tokens || 8192,
+    max_tokens: maxTokens,
     messages,
   };
 
@@ -323,17 +331,31 @@ function convertSSELine(line, state) {
     return null;
   }
 
-  if (type === "content_block_stop" || type === "message_delta") {
+  if (type === "content_block_stop") {
+    return null;
+  }
+
+  if (type === "message_delta") {
+    // Capture the real stop_reason from upstream
+    const delta = event_obj.delta || {};
+    if (delta.stop_reason) {
+      state.stopReason = delta.stop_reason;
+    }
+    // Capture usage if present
+    if (event_obj.usage) {
+      state.usage = event_obj.usage;
+    }
     return null;
   }
 
   if (type === "message_stop") {
+    const finishReason = mapStopReason(state.stopReason);
     const chunk = {
       id: state.id,
       object: "chat.completion.chunk",
       created: Math.floor(Date.now() / 1000),
       model: state.model,
-      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+      choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
     };
     return `data: ${JSON.stringify(chunk)}\n\n`;
   }
@@ -342,18 +364,32 @@ function convertSSELine(line, state) {
 }
 
 // ─── 发送 HTTPS 请求（支持代理 / 直连）────────────────────
-function sendRequest(upstreamUrl, bodyStr, isStream, apiKey, provider) {
-  const proxyStr = provider?.proxy;
-  const userAgent = provider?.userAgent || "cc-switch-bridge/2.0";
-
-  if (proxyStr) {
-    return requestViaProxy(upstreamUrl, bodyStr, isStream, apiKey, userAgent, proxyStr);
-  } else {
-    return requestDirect(upstreamUrl, bodyStr, isStream, apiKey, userAgent);
+function buildUpstreamHeaders(bodyStr, apiKey, userAgent, opts = {}) {
+  const headers = {
+    "Content-Type": "application/json",
+    "Content-Length": Buffer.byteLength(bodyStr),
+    "Authorization": `Bearer ${apiKey}`,
+    "User-Agent": userAgent,
+  };
+  if (opts.anthropic !== false) {
+    headers["anthropic-version"] = "2023-06-01";
   }
+  return headers;
 }
 
-function requestViaProxy(upstreamUrl, bodyStr, isStream, apiKey, userAgent, proxyStr) {
+function sendRequest(upstreamUrl, bodyStr, isStream, apiKey, provider, opts = {}) {
+  const proxyStr = provider?.proxy;
+  const userAgent = provider?.userAgent || "cc-switch-bridge/2.0";
+  const upstreamPath = opts.path || "/v1/messages";
+  const headers = buildUpstreamHeaders(bodyStr, apiKey, userAgent, opts);
+
+  if (proxyStr) {
+    return requestViaProxy(upstreamUrl, bodyStr, isStream, headers, proxyStr, upstreamPath);
+  }
+  return requestDirect(upstreamUrl, bodyStr, isStream, headers, upstreamPath);
+}
+
+function requestViaProxy(upstreamUrl, bodyStr, isStream, headers, proxyStr, upstreamPath) {
   return new Promise((resolve, reject) => {
     const proxyUrl = new URL(proxyStr);
 
@@ -374,15 +410,9 @@ function requestViaProxy(upstreamUrl, bodyStr, isStream, apiKey, userAgent, prox
         socket: socket,
         host: upstreamUrl.hostname,
         port: 443,
-        path: "/v1/messages",
+        path: upstreamPath,
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(bodyStr),
-          "Authorization": `Bearer ${apiKey}`,
-          "anthropic-version": "2023-06-01",
-          "User-Agent": userAgent,
-        },
+        headers,
       }, (res) => {
         if (isStream) {
           resolve(res);
@@ -412,20 +442,14 @@ function requestViaProxy(upstreamUrl, bodyStr, isStream, apiKey, userAgent, prox
   });
 }
 
-function requestDirect(upstreamUrl, bodyStr, isStream, apiKey, userAgent) {
+function requestDirect(upstreamUrl, bodyStr, isStream, headers, upstreamPath) {
   return new Promise((resolve, reject) => {
     const req = https.request({
       hostname: upstreamUrl.hostname,
       port: 443,
-      path: "/v1/messages",
+      path: upstreamPath,
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(bodyStr),
-        "Authorization": `Bearer ${apiKey}`,
-        "anthropic-version": "2023-06-01",
-        "User-Agent": userAgent,
-      },
+      headers,
     }, (res) => {
       if (isStream) {
         resolve(res);
@@ -479,6 +503,7 @@ const server = http.createServer(async (req, res) => {
       defaultProvider: CONFIG.defaultProvider,
       keyMode: CONFIG.keyMode,
       endpoints: ["/v1/chat/completions", "/v1/models"],
+      passthrough: "grok-* → OpenAI /v1/chat/completions; others → Anthropic /v1/messages",
     }));
     return;
   }
@@ -529,15 +554,22 @@ const server = http.createServer(async (req, res) => {
           return;
         }
 
-        // 3. 转换请求
-        const anthropicBody = openaiToAnthropic(openaiBody, provider);
-
-        log(`${isStream ? "STREAM" : "NORMAL"} model=${requestedModel} provider=${provider.id} key=${apiKey.slice(0, 8)}... msgs=${anthropicBody.messages.length}`);
-
-        // 4. 发送请求
+        const passthrough = isOpenaiPassthrough(requestedModel);
         const upstreamUrl = new URL(provider.upstream);
-        const bodyStr = JSON.stringify(anthropicBody);
-        const result = await sendRequest(upstreamUrl, bodyStr, isStream, apiKey, provider);
+        const msgCount = Array.isArray(openaiBody.messages) ? openaiBody.messages.length : 0;
+        log(`${isStream ? "STREAM" : "NORMAL"} ${passthrough ? "PASSTHROUGH" : "CONVERT"} model=${requestedModel} provider=${provider.id} key=${apiKey.slice(0, 8)}... msgs=${msgCount}`);
+
+        let bodyStr;
+        let sendOpts;
+        if (passthrough) {
+          bodyStr = JSON.stringify(openaiBody);
+          sendOpts = { path: "/v1/chat/completions", anthropic: false };
+        } else {
+          bodyStr = JSON.stringify(openaiToAnthropic(openaiBody, provider));
+          sendOpts = { path: "/v1/messages", anthropic: true };
+        }
+
+        const result = await sendRequest(upstreamUrl, bodyStr, isStream, apiKey, provider, sendOpts);
 
         if (isStream) {
           res.writeHead(200, {
@@ -557,6 +589,14 @@ const server = http.createServer(async (req, res) => {
               res.write(`data: ${JSON.stringify({ error: { message: `Upstream error: ${upstreamRes.statusCode}`, type: "upstream_error" } })}\n\n`);
               res.write("data: [DONE]\n\n");
               res.end();
+            });
+            return;
+          }
+
+          if (passthrough) {
+            upstreamRes.pipe(res);
+            req.on("close", () => {
+              upstreamRes.destroy?.();
             });
             return;
           }
@@ -605,9 +645,9 @@ const server = http.createServer(async (req, res) => {
             return;
           }
 
-          const openaiResp = anthropicToOpenai(respBody, openaiBody.model);
+          const openaiResp = passthrough ? respBody : anthropicToOpenai(respBody, openaiBody.model);
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify(openaiResp));
+          res.end(typeof openaiResp === "string" ? openaiResp : JSON.stringify(openaiResp));
         }
       } catch (err) {
         logError(err.message);
@@ -632,7 +672,7 @@ server.listen(CONFIG.port, CONFIG.bind, () => {
 
   console.log(`
 ╔══════════════════════════════════════════════════════════╗
-║  CC Switch Bridge v2.0 — OpenAI ↔ Anthropic 转换代理    ║
+║  CC Switch Bridge v2.1 — OpenAI 入站 / Grok 透传         ║
 ╠══════════════════════════════════════════════════════════╣
 ║  监听: http://${CONFIG.bind}:${CONFIG.port}
 ║  Key模式: ${CONFIG.keyMode}
