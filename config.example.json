@@ -26,6 +26,17 @@
       "apiKeys": ["your-api-key-here"],
       "keyStrategy": "round-robin",
       "models": ["grok-4.6", "grok-4.7"]
+    },
+    {
+      "id": "jev",
+      "name": "Jev Provider",
+      "upstream": "https://your-upstream-api.com",
+      "protocol": "openai",
+      "proxy": "http://127.0.0.1:7890",
+      "userAgent": "claude-code/1.0.0",
+      "apiKeys": ["your-api-key-here"],
+      "keyStrategy": "round-robin",
+      "models": ["jev"]
     }
   ],
   "log": {

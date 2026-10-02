@@ -277,6 +277,91 @@ function mapStopReason(reason) {
   return "stop";
 }
 
+// ─── OpenAI → TypeSafe 请求转换 ─────────────────────────
+function openaiToTypesafe(openaiBody, provider) {
+  // 提取用户消息文本
+  const textParts = [];
+  for (const msg of openaiBody.messages || []) {
+    if (msg.role === "system") continue;
+    if (typeof msg.content === "string") {
+      textParts.push(msg.content);
+    } else if (Array.isArray(msg.content)) {
+      for (const part of msg.content) {
+        if (part.type === "text" && part.text) textParts.push(part.text);
+      }
+    }
+  }
+  const lastMsg = textParts[textParts.length - 1] || "";
+  const state = textParts.join("\n");
+
+  const tsConfig = provider.typesafe || {};
+  const model = tsConfig.model || "jev-latest";
+
+  // 智能判断：如果最后一条用户消息是问句，直接用作 instructions
+  const isQuestion = /[?？]\s*$/.test(lastMsg.trim());
+  const defaultQ = isQuestion
+    ? { type: "noul", instructions: lastMsg.trim() }
+    : (tsConfig.defaultQuestion || {
+        type: "noul",
+        instructions: "请分析这条消息并给出你的判断。",
+      });
+
+  const questions = {};
+  questions["q1"] = { ...defaultQ };
+
+  return { state, model, questions };
+}
+
+// ─── TypeSafe → OpenAI 响应转换 ─────────────────────────
+function typesafeToOpenai(tsResp, model) {
+  const answers = tsResp.answers || {};
+  const lines = [];
+
+  for (const [id, ans] of Object.entries(answers)) {
+    if (ans.type === "noul") {
+      lines.push(`[${id}] noul: ${ans.noul}`);
+    } else if (ans.type === "choice") {
+      lines.push(`[${id}] choice: ${ans.choice} (confidence: ${ans.confidence})`);
+      if (ans.probabilities) {
+        const probs = Object.entries(ans.probabilities)
+          .map(([k, v]) => `  ${k}: ${(v * 100).toFixed(1)}%`)
+          .join("\n");
+        lines.push(probs);
+      }
+    } else if (ans.type === "score") {
+      lines.push(`[${id}] score: ${ans.score} (confidence: ${ans.confidence})`);
+      if (ans.probabilities) {
+        const probs = Object.entries(ans.probabilities)
+          .map(([k, v]) => `  ${k}: ${(v * 100).toFixed(1)}%`)
+          .join("\n");
+        lines.push(probs);
+      }
+    } else {
+      lines.push(`[${id}] ${JSON.stringify(ans)}`);
+    }
+  }
+
+  const content = lines.join("\n");
+  const usage = tsResp.usage || {};
+
+  return {
+    id: tsResp.id || `chatcmpl-${crypto.randomUUID()}`,
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model: model || tsResp.model || "jev-latest",
+    choices: [{
+      index: 0,
+      message: { role: "assistant", content },
+      finish_reason: "stop",
+    }],
+    usage: {
+      prompt_tokens: usage.input_tokens || 0,
+      completion_tokens: usage.output_tokens || 0,
+      total_tokens: (usage.input_tokens || 0) + (usage.output_tokens || 0),
+    },
+  };
+}
+
 // ─── SSE 流式转换 ───────────────────────────────────────
 function convertSSELine(line, state) {
   if (!line.startsWith("data: ")) return null;
@@ -499,7 +584,7 @@ const server = http.createServer(async (req, res) => {
       defaultProvider: CONFIG.defaultProvider,
       keyMode: CONFIG.keyMode,
       endpoints: ["/v1/chat/completions", "/v1/models"],
-      passthrough: "Provider protocol config: openai → /v1/chat/completions; anthropic → /v1/messages",
+      passthrough: "Provider protocol config: openai → /v1/chat/completions; anthropic → /v1/messages; typesafe → /v1/systemone",
     }));
     return;
   }
@@ -551,13 +636,17 @@ const server = http.createServer(async (req, res) => {
         }
 
         const openaiProvider = provider.protocol === "openai";
+        const typesafeProvider = provider.protocol === "typesafe";
         const upstreamUrl = new URL(provider.upstream);
         const msgCount = Array.isArray(openaiBody.messages) ? openaiBody.messages.length : 0;
-        log(`${isStream ? "STREAM" : "NORMAL"} ${openaiProvider ? "OPENAI" : "ANTHROPIC"} model=${requestedModel} provider=${provider.id} protocol=${provider.protocol || "anthropic"} key=${apiKey.slice(0, 8)}... msgs=${msgCount}`);
+        log(`${isStream ? "STREAM" : "NORMAL"} ${typesafeProvider ? "TYPESAFE" : openaiProvider ? "OPENAI" : "ANTHROPIC"} model=${requestedModel} provider=${provider.id} protocol=${provider.protocol || "anthropic"} key=${apiKey.slice(0, 8)}... msgs=${msgCount}`);
 
         let bodyStr;
         let sendOpts;
-        if (openaiProvider) {
+        if (typesafeProvider) {
+          bodyStr = JSON.stringify(openaiToTypesafe(openaiBody, provider));
+          sendOpts = { path: "/v1/systemone", anthropic: false };
+        } else if (openaiProvider) {
           bodyStr = JSON.stringify(openaiBody);
           sendOpts = { path: "/v1/chat/completions", anthropic: false };
         } else {
@@ -593,6 +682,57 @@ const server = http.createServer(async (req, res) => {
             upstreamRes.pipe(res);
             req.on("close", () => {
               upstreamRes.destroy?.();
+            });
+            return;
+          }
+
+          // TypeSafe: non-streaming upstream, simulate SSE
+          if (typesafeProvider) {
+            let tsData = "";
+            upstreamRes.on("data", (c) => (tsData += c));
+            upstreamRes.on("end", () => {
+              if (upstreamRes.statusCode !== 200) {
+                logError(`TypeSafe upstream ${upstreamRes.statusCode}: ${tsData}`);
+                res.write(`data: ${JSON.stringify({ error: { message: `Upstream error: ${upstreamRes.statusCode}`, type: "upstream_error" } })}\n\n`);
+                res.write("data: [DONE]\n\n");
+                res.end();
+                return;
+              }
+              try {
+                const tsResp = JSON.parse(tsData);
+                const openaiResp = typesafeToOpenai(tsResp, openaiBody.model);
+                const content = openaiResp.choices[0].message.content;
+
+                // Role chunk
+                res.write(`data: ${JSON.stringify({
+                  id: openaiResp.id, object: "chat.completion.chunk",
+                  created: openaiResp.created, model: openaiResp.model,
+                  choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }],
+                })}\n\n`);
+                // Content chunk
+                res.write(`data: ${JSON.stringify({
+                  id: openaiResp.id, object: "chat.completion.chunk",
+                  created: openaiResp.created, model: openaiResp.model,
+                  choices: [{ index: 0, delta: { content }, finish_reason: null }],
+                })}\n\n`);
+                // Finish chunk
+                res.write(`data: ${JSON.stringify({
+                  id: openaiResp.id, object: "chat.completion.chunk",
+                  created: openaiResp.created, model: openaiResp.model,
+                  choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+                })}\n\n`);
+                res.write("data: [DONE]\n\n");
+                res.end();
+              } catch (e) {
+                logError(`TypeSafe parse error: ${e.message}`);
+                res.write(`data: ${JSON.stringify({ error: { message: e.message, type: "server_error" } })}\n\n`);
+                res.write("data: [DONE]\n\n");
+                res.end();
+              }
+            });
+            upstreamRes.on("error", (err) => {
+              logError(`TypeSafe stream error: ${err.message}`);
+              res.end();
             });
             return;
           }
@@ -641,7 +781,8 @@ const server = http.createServer(async (req, res) => {
             return;
           }
 
-          const openaiResp = openaiProvider ? respBody : anthropicToOpenai(respBody, openaiBody.model);
+          const openaiResp = typesafeProvider ? typesafeToOpenai(respBody, openaiBody.model)
+            : openaiProvider ? respBody : anthropicToOpenai(respBody, openaiBody.model);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(typeof openaiResp === "string" ? openaiResp : JSON.stringify(openaiResp));
         }
